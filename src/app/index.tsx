@@ -167,7 +167,6 @@ export default function HomeScreen() {
           </Pressable>
         )}
       </View>
-
       <View style={styles.screenFrame}>
         {isRunning ? (
           <GbaEmulatorView

@@ -98,6 +98,41 @@ pub extern "system" fn Java_expo_modules_gbaemulator_GbaNative_getAudioBuffer<'l
     JObject::from(array).into_raw()
 }
 
+/// Returns the current cartridge's battery-backed save memory as a
+/// freshly-allocated Java `ByteArray`, for the Kotlin side to write to its
+/// own storage — see `Instance::save_data`. Returns an empty array (never
+/// null) if there's no instance, no ROM loaded, or the cartridge has no
+/// save chip.
+#[no_mangle]
+pub extern "system" fn Java_expo_modules_gbaemulator_GbaNative_getSaveData<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+) -> JByteArray<'local> {
+    let data = with_instance(ptr, |instance| instance.save_data()).unwrap_or_default();
+    let Ok(array) = env.byte_array_from_slice(&data) else {
+        return JByteArray::default();
+    };
+    array
+}
+
+/// Restores save memory (previously obtained from `getSaveData`) into the
+/// currently loaded cartridge — see `Instance::load_save_data`. Must be
+/// called after `loadRom`. Returns `false` if there's no instance or no
+/// ROM is loaded.
+#[no_mangle]
+pub extern "system" fn Java_expo_modules_gbaemulator_GbaNative_loadSaveData<'local>(
+    env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    ptr: jlong,
+    data: JByteArray<'local>,
+) -> jboolean {
+    let Ok(bytes) = env.convert_byte_array(&data) else {
+        return JNI_FALSE;
+    };
+    with_instance(ptr, |instance| instance.load_save_data(&bytes) as jboolean).unwrap_or(JNI_FALSE)
+}
+
 #[no_mangle]
 pub extern "system" fn Java_expo_modules_gbaemulator_GbaNative_setKey(
     _env: JNIEnv,

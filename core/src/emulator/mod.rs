@@ -171,17 +171,42 @@ impl Emulator {
     /// conditions into interrupt requests, and fires any DMA channel
     /// armed for VBlank/HBlank — the shared tail of both normal
     /// instruction execution and halted idle-ticking.
+    ///
+    /// VBlank/HBlank/VCounter requests deliberately use the *raw*,
+    /// DISPSTAT-unfiltered PPU signal (`vblank_timing`/`hblank_timing`/
+    /// `vcounter_raw`) rather than `vblank`/`hblank`/`vcounter`, gating
+    /// only on IE. Real hardware also requires DISPSTAT's matching
+    /// per-source enable bit — this is a deliberate compatibility
+    /// deviation, not a hardware-accuracy claim.
+    ///
+    /// Why: the bundled BIOS replacement (`assets/bios/`, since this
+    /// project can't ship Nintendo's own) dispatches every IRQ through the
+    /// game's user-handler pointer at `0x03FFFFFC` with no null check.
+    /// During the BIOS's own boot-logo animation it waits on VBlank itself
+    /// — before any game has installed that pointer — so that dispatch
+    /// jumps to address 0 (the reset vector) instead of returning
+    /// harmlessly, re-entering boot. Pokemon FireRed's engine (confirmed;
+    /// LeafGreen/Ruby/Sapphire/Emerald likely too, sharing the same
+    /// engine) stages hardware register writes — including DISPSTAT's own
+    /// IRQ-enable bits — into a RAM-side shadow copy that only gets
+    /// flushed to real I/O from within the VBlank handler itself, so
+    /// without an initial VBlank ever reaching *their* handler, DISPSTAT
+    /// never gets enabled for real and the game hangs forever waiting for
+    /// it. Ignoring DISPSTAT here breaks that deadlock at the cost of
+    /// being too permissive versus real hardware (a game with IE armed but
+    /// DISPSTAT briefly *not* — a legitimate, real pattern — now gets that
+    /// interrupt anyway).
     fn tick_peripherals(&mut self, cycles: u32) {
         let ppu_events = self.bus.ppu_mut().tick(cycles);
         let timer_events = self.bus.timers_mut().tick(cycles);
 
-        if ppu_events.vblank {
+        if ppu_events.vblank_timing {
             self.bus.interrupts_mut().request(InterruptSource::VBlank);
         }
-        if ppu_events.hblank {
+        if ppu_events.hblank_timing {
             self.bus.interrupts_mut().request(InterruptSource::HBlank);
         }
-        if ppu_events.vcounter {
+        if ppu_events.vcounter_raw {
             self.bus.interrupts_mut().request(InterruptSource::VCounter);
         }
         // DMA's VBlank/HBlank start timing is a raw hardware signal, not

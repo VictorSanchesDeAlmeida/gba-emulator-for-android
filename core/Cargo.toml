@@ -7,3 +7,9 @@ description = "Independent Game Boy Advance emulator core (no React Native / Exp
 [lib]
 name = "gba_core"
 path = "src/lib.rs"
+
+[dev-dependencies]
+# Real, verified ARM/Thumb disassembler for debugging real-ROM boot
+# hangs — deliberately not a hand-rolled decoder, since a from-scratch one
+# is exactly what turned out untrustworthy during the FireRed investigation.
+capstone = "0.14"

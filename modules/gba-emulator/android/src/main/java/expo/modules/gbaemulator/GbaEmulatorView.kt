@@ -12,6 +12,8 @@ import android.util.Base64
 import android.view.Choreographer
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.views.ExpoView
+import java.io.File
+import java.util.concurrent.Executors
 
 private const val SCREEN_WIDTH = 240
 private const val SCREEN_HEIGHT = 160
@@ -20,6 +22,39 @@ private const val SCREEN_HEIGHT = 160
 // the rate the core's audio gets resampled to before it ever reaches this
 // view, so this side just has to play it back at the same rate, not choose one.
 private const val AUDIO_SAMPLE_RATE_HZ = 32_768
+
+// GBA's real, fixed refresh rate — CPU_CLOCK_HZ / CYCLES_PER_FRAME in
+// native/ffi/src/lib.rs, i.e. exactly 16,777,216 / 280,896 Hz. Choreographer
+// callbacks are *not* a reliable proxy for this: they fire at whatever the
+// host display's actual composition rate is (60Hz normally, but often 90 or
+// 120Hz on modern hardware, or throttled to 30Hz under power saving/thermal
+// limits — this device measured a sustained 30Hz during testing). Calling
+// runFrame() exactly once per callback silently ties emulation speed to
+// that host rate instead of the GBA's own: at 30Hz the game runs at half
+// speed and produces audio at half the real-time rate, which starves
+// AudioTrack's playback (draining at the real, fixed 32,768Hz) into a
+// continuous, growing underrun — the actual cause of this project's
+// "audio estourando" bug, not a gain/clipping issue. `doFrame` below
+// instead tracks real elapsed time and runs as many emulated frames as
+// that time is actually worth, so playback speed and audio pacing stay
+// correct regardless of the host's callback rate.
+private const val GBA_FRAME_NANOS = 1_000_000_000L * 280_896L / 16_777_216L
+
+// Caps how many emulated frames a single doFrame catches up on after a
+// stall (e.g. the app was backgrounded, or a GC pause ate several host
+// frames) — without this, a long-enough stall would make doFrame try to
+// run thousands of frames in one shot, hanging the UI thread trying to
+// "catch up" instead of just resuming at normal speed with a brief skip.
+private const val MAX_CATCHUP_FRAMES = 4
+
+// How often doFrame checks whether cartridge save memory (SRAM/Flash) has
+// changed and, if so, persists it to disk — a real cartridge's save chip
+// is battery-backed and just always current, but this emulator only has
+// an in-memory copy until something writes it out. ~1s: frequent enough
+// that a crash/force-close loses at most a second of progress, infrequent
+// enough that the (cheap, but non-zero) byte-compare and occasional disk
+// write never contend with the audio/video pacing this same callback owns.
+private const val SAVE_CHECK_INTERVAL_FRAMES = 60
 
 /**
  * Button name -> numeric ID. Must match `gba_core::joypad::Button::from_index`
@@ -40,10 +75,11 @@ private val BUTTON_IDS = mapOf(
 
 /**
  * Renders the GBA framebuffer directly to a Canvas, driven by its own
- * Choreographer-scheduled loop (~60Hz, matching the console's own
- * refresh rate) — no per-frame JS bridge traffic. React only sets props
- * (which ROM to load, whether to run) and lays the view out; everything
- * from "Rust produced a frame" to "pixels on screen" stays native.
+ * Choreographer-scheduled loop — paced by real elapsed time against the
+ * GBA's own fixed frame rate (see [GBA_FRAME_NANOS]), not by raw callback
+ * count — no per-frame JS bridge traffic. React only sets props (which
+ * ROM to load, whether to run) and lays the view out; everything from
+ * "Rust produced a frame" to "pixels on screen" stays native.
  */
 class GbaEmulatorView(context: Context, appContext: AppContext) : ExpoView(context, appContext) {
   private val nativePtr: Long = GbaNative.create()
@@ -96,16 +132,63 @@ class GbaEmulatorView(context: Context, appContext: AppContext) : ExpoView(conte
   private var biosBytes: ByteArray? = null
   private var pendingRomBytes: ByteArray? = null
 
+  // Where this ROM's cartridge save memory lives on disk, chosen by the JS
+  // side (typically derived from the ROM's own filename) — this view just
+  // reads/writes whatever path it's given, on its own schedule; see
+  // maybeLoadRom (restore) and persistSaveData (autosave).
+  private var savePath: String? = null
+  private var lastPersistedSaveData: ByteArray? = null
+  private var saveCheckCounter = 0
+
+  // Autosave writes happen off the Choreographer thread so a slow disk
+  // never steals time from audio/video pacing — the same lesson the frame
+  // pacing fix above already had to learn once. Single-threaded: save
+  // writes are small and infrequent, and strictly ordering them avoids an
+  // older write racing a newer one out of order onto disk.
+  private val saveExecutor = Executors.newSingleThreadExecutor()
+
+  // Real elapsed time not yet "spent" on an emulated frame — see
+  // GBA_FRAME_NANOS's doc comment for why doFrame is paced by this instead
+  // of by raw Choreographer callback count.
+  private var lastFrameTimeNanos = 0L
+  private var accumulatorNanos = 0L
+
   private val frameCallback = object : Choreographer.FrameCallback {
     override fun doFrame(frameTimeNanos: Long) {
-      if (running && loaded && GbaNative.runFrame(nativePtr)) {
-        GbaNative.getFrameBuffer(nativePtr, pixels)
-        bitmap.setPixels(pixels, 0, SCREEN_WIDTH, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
-        invalidate()
+      if (lastFrameTimeNanos != 0L) {
+        accumulatorNanos += frameTimeNanos - lastFrameTimeNanos
+      }
+      lastFrameTimeNanos = frameTimeNanos
 
-        val samples = GbaNative.getAudioBuffer(nativePtr)
-        if (samples.isNotEmpty()) {
-          audioTrack.write(samples, 0, samples.size)
+      if (running && loaded) {
+        var framesRun = 0
+        while (accumulatorNanos >= GBA_FRAME_NANOS && framesRun < MAX_CATCHUP_FRAMES) {
+          if (!GbaNative.runFrame(nativePtr)) break
+          accumulatorNanos -= GBA_FRAME_NANOS
+          framesRun++
+
+          val samples = GbaNative.getAudioBuffer(nativePtr)
+          if (samples.isNotEmpty()) {
+            audioTrack.write(samples, 0, samples.size)
+          }
+        }
+        // A stall much longer than the catch-up cap (app backgrounded,
+        // a long GC pause, ...) — resume at normal speed with a brief
+        // visible/audible skip instead of ever trying to run the missed
+        // time back-to-back.
+        if (accumulatorNanos > GBA_FRAME_NANOS * MAX_CATCHUP_FRAMES) {
+          accumulatorNanos = 0L
+        }
+        if (framesRun > 0) {
+          GbaNative.getFrameBuffer(nativePtr, pixels)
+          bitmap.setPixels(pixels, 0, SCREEN_WIDTH, 0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+          invalidate()
+
+          saveCheckCounter += framesRun
+          if (saveCheckCounter >= SAVE_CHECK_INTERVAL_FRAMES) {
+            saveCheckCounter = 0
+            persistSaveDataIfChanged()
+          }
         }
       }
       Choreographer.getInstance().postFrameCallback(this)
@@ -128,11 +211,58 @@ class GbaEmulatorView(context: Context, appContext: AppContext) : ExpoView(conte
     maybeLoadRom()
   }
 
+  // Where to read/write this ROM's cartridge save memory. Like
+  // biosBase64/romBase64, this re-triggers maybeLoadRom on change — the
+  // JS side sets it once, alongside romBase64, when a ROM is first picked,
+  // not something that changes mid-session.
+  fun setSavePath(path: String?) {
+    savePath = path
+    maybeLoadRom()
+  }
+
   private fun maybeLoadRom() {
     val rom = pendingRomBytes ?: return
     biosBytes?.let { GbaNative.loadBios(nativePtr, it) }
     loaded = GbaNative.loadRom(nativePtr, rom)
     running = loaded
+    lastPersistedSaveData = null
+    saveCheckCounter = 0
+    if (loaded) {
+      savePath?.let { path ->
+        val file = File(path)
+        if (file.exists()) {
+          val data = file.readBytes()
+          GbaNative.loadSaveData(nativePtr, data)
+          lastPersistedSaveData = data
+        }
+      }
+    }
+  }
+
+  /**
+   * Writes current cartridge save memory to [savePath] if it differs from
+   * what's already there — called periodically from [doFrame] and once
+   * more (synchronously) from [onDetachedFromWindow]. A no-op if there's
+   * no save path, no ROM loaded, or the cartridge has no save chip
+   * (`getSaveData` returns empty in that case).
+   */
+  private fun persistSaveDataIfChanged(sync: Boolean = false) {
+    val path = savePath ?: return
+    if (!loaded) return
+    val data = GbaNative.getSaveData(nativePtr)
+    if (data.isEmpty() || data.contentEquals(lastPersistedSaveData)) return
+    lastPersistedSaveData = data
+    val write = {
+      try {
+        val file = File(path)
+        file.parentFile?.mkdirs()
+        file.writeBytes(data)
+      } catch (_: Exception) {
+        // Best-effort: a failed autosave shouldn't crash gameplay. The
+        // next successful write (or the final one on close) still lands.
+      }
+    }
+    if (sync) write() else saveExecutor.execute(write)
   }
 
   fun setTestPattern(enabled: Boolean) {
@@ -179,6 +309,10 @@ class GbaEmulatorView(context: Context, appContext: AppContext) : ExpoView(conte
 
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
+    // Synchronous: the view (and possibly the process) may not survive
+    // long enough for a background-queued write to run.
+    persistSaveDataIfChanged(sync = true)
+    saveExecutor.shutdown()
     Choreographer.getInstance().removeFrameCallback(frameCallback)
     audioTrack.stop()
     audioTrack.release()

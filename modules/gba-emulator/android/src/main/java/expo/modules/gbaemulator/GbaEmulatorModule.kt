@@ -21,6 +21,12 @@ class GbaEmulatorModule : Module() {
       Prop("biosBase64") { view: GbaEmulatorView, value: String? ->
         view.setBiosBase64(value)
       }
+      // Absolute filesystem path for this ROM's cartridge save memory —
+      // read once on load, autosaved to periodically. See GbaEmulatorView's
+      // setSavePath doc comment.
+      Prop("savePath") { view: GbaEmulatorView, value: String? ->
+        view.setSavePath(value)
+      }
       // Development/diagnostic only: renders a fixed colorful scene
       // without needing a ROM, to verify the rendering pipeline itself.
       Prop("testPattern") { view: GbaEmulatorView, value: Boolean ->

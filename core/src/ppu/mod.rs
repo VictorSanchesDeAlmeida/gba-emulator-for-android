@@ -31,12 +31,15 @@ const TOTAL_SCANLINES: u16 = 228;
 /// Which PPU-driven conditions newly occurred during a [`Ppu::tick`] call.
 /// `vblank`/`hblank`/`vcounter` are filtered by DISPSTAT's own per-source
 /// IRQ-enable bits — what decides whether the CPU actually gets
-/// interrupted. `vblank_timing`/`hblank_timing` are the *unconditional*
-/// hardware signal, unaffected by DISPSTAT: DMA channels armed for
+/// interrupted. `vblank_timing`/`hblank_timing`/`vcounter_raw` are the
+/// *unconditional* hardware signal, unaffected by DISPSTAT.
+/// `vblank_timing`/`hblank_timing` exist because DMA channels armed for
 /// VBlank/HBlank start timing trigger on real scanline transitions
 /// regardless of whether any interrupt is enabled — DMA and the CPU
 /// interrupt controller are separate hardware units that both happen to
-/// watch the same PPU timing, not one gating the other.
+/// watch the same PPU timing, not one gating the other. `vcounter_raw`
+/// exists for [`crate::emulator::Emulator`]'s BIOS-compatibility fallback —
+/// see its doc comment on `tick_peripherals`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IrqEvents {
     pub vblank: bool,
@@ -44,6 +47,7 @@ pub struct IrqEvents {
     pub vcounter: bool,
     pub vblank_timing: bool,
     pub hblank_timing: bool,
+    pub vcounter_raw: bool,
 }
 
 /// Sign-extends a 28-bit value (BGxX/BGxY's actual range) held in a u32.
@@ -444,8 +448,11 @@ impl Ppu {
                         events.vblank = true;
                     }
                 }
-                if self.vcounter_match() && self.vcounter_irq_enabled() {
-                    events.vcounter = true;
+                if self.vcounter_match() {
+                    events.vcounter_raw = true;
+                    if self.vcounter_irq_enabled() {
+                        events.vcounter = true;
+                    }
                 }
             }
         }

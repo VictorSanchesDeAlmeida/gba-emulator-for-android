@@ -1,3 +1,4 @@
+import { Asset } from "expo-asset";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system/legacy";
 import { useEffect, useState } from "react";
@@ -18,12 +19,12 @@ const ACCENT = "#7C6BAE"; // GBA-indigo
 const SCREEN_ASPECT = 240 / 160;
 const SCREEN_WIDTH = Dimensions.get("screen").width - 30;
 
-// Real GBA BIOS dumps are always exactly 16KB. This project can't ship
-// Nintendo's own BIOS, so this is the user's own dump — persisted once
-// under the app's document directory so they don't have to re-pick it
-// every launch.
-const BIOS_SIZE = 16384;
-const BIOS_PATH = FileSystem.documentDirectory + "gba_bios.bin";
+// This project can't ship Nintendo's own BIOS, so it bundles
+// Cult-of-GBA/BIOS instead — an independent, MIT-licensed, from-scratch
+// replacement (see assets/bios/LICENSE) — so the app never has to ask the
+// user for a dump of their own.
+// eslint-disable-next-line @typescript-eslint/no-require-imports -- .bin isn't in eslint-config-expo's asset allowlist, but metro.config.js registers it as one (see there)
+const BUNDLED_BIOS = require("../../assets/bios/gba_bios.bin");
 
 /** Held-button set for a Pressable's onPressIn/onPressOut, one button at a time. */
 function useHeldButtons() {
@@ -84,29 +85,49 @@ function RoundButton({
   );
 }
 
+/**
+ * Where a picked ROM's cartridge save memory should live on disk, derived
+ * from the ROM's own filename (swapping its extension for `.sav`) so the
+ * same save is found again next time the same ROM is picked — the usual
+ * convention standalone GBA emulators use. Lives in `documentDirectory`
+ * (survives app restarts, not cleared like cache) under `saves/`; the
+ * native side creates that directory itself on first write.
+ */
+function savePathFor(romFileName: string): string | undefined {
+  const documentDir = FileSystem.documentDirectory;
+  if (!documentDir) return undefined;
+  // The native side reads/writes this with a plain java.io.File, which
+  // needs a filesystem path, not a `file://` URI.
+  const rawDir = documentDir.replace(/^file:\/\//, "");
+  const baseName = romFileName.replace(/\.[^./]+$/, "");
+  return `${rawDir}saves/${baseName}.sav`;
+}
+
 export default function HomeScreen() {
   const [romBase64, setRomBase64] = useState<string | undefined>(undefined);
   const [testPattern, setTestPattern] = useState(false);
   const [biosBase64, setBiosBase64] = useState<string | undefined>(undefined);
-  const [biosChecked, setBiosChecked] = useState(false);
+  const [savePath, setSavePath] = useState<string | undefined>(undefined);
   const { held, press, release } = useHeldButtons();
 
   const isRunning = Boolean(romBase64) || testPattern;
 
-  // Load a previously-picked BIOS from disk once, on first mount, so it
-  // doesn't have to be re-picked every launch.
+  // Load the bundled open-source BIOS replacement once, on first mount —
+  // no user action needed. If this somehow fails, biosBase64 just stays
+  // undefined and the core's built-in (less game-compatible) HLE BIOS
+  // takes over instead of the app being unable to run anything.
   useEffect(() => {
     (async () => {
       try {
-        const info = await FileSystem.getInfoAsync(BIOS_PATH);
-        if (info.exists) {
-          const base64 = await FileSystem.readAsStringAsync(BIOS_PATH, {
-            encoding: FileSystem.EncodingType.Base64,
-          });
-          setBiosBase64(base64);
-        }
-      } finally {
-        setBiosChecked(true);
+        const asset = Asset.fromModule(BUNDLED_BIOS);
+        await asset.downloadAsync();
+        if (!asset.localUri) return;
+        const base64 = await FileSystem.readAsStringAsync(asset.localUri, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+        setBiosBase64(base64);
+      } catch (err) {
+        console.warn("Failed to load bundled BIOS", err);
       }
     })();
   }, []);
@@ -117,43 +138,21 @@ export default function HomeScreen() {
     });
     if (result.canceled) return;
     try {
-      const base64 = await FileSystem.readAsStringAsync(result.assets[0].uri, {
+      const asset = result.assets[0];
+      const base64 = await FileSystem.readAsStringAsync(asset.uri, {
         encoding: FileSystem.EncodingType.Base64,
       });
       setRomBase64(base64);
+      setSavePath(savePathFor(asset.name));
       setTestPattern(false);
     } catch (err) {
       Alert.alert("Failed to read ROM", String(err));
     }
   }
 
-  async function pickBios() {
-    const result = await DocumentPicker.getDocumentAsync({
-      copyToCacheDirectory: true,
-    });
-    if (result.canceled) return;
-    try {
-      const uri = result.assets[0].uri;
-      const info = await FileSystem.getInfoAsync(uri);
-      if (!info.exists || info.size !== BIOS_SIZE) {
-        Alert.alert(
-          "Not a GBA BIOS file",
-          `Expected a 16KB (${BIOS_SIZE} byte) BIOS dump, got ${info.exists ? `${info.size} bytes` : "nothing"}.`,
-        );
-        return;
-      }
-      await FileSystem.copyAsync({ from: uri, to: BIOS_PATH });
-      const base64 = await FileSystem.readAsStringAsync(BIOS_PATH, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-      setBiosBase64(base64);
-    } catch (err) {
-      Alert.alert("Failed to read BIOS", String(err));
-    }
-  }
-
   function closeGame() {
     setRomBase64(undefined);
+    setSavePath(undefined);
     setTestPattern(false);
   }
 
@@ -174,6 +173,7 @@ export default function HomeScreen() {
             testPattern={testPattern}
             romBase64={romBase64}
             biosBase64={biosBase64}
+            savePath={savePath}
             pressedButtons={held}
             running
           />
@@ -255,20 +255,6 @@ export default function HomeScreen() {
             onPress={() => setTestPattern(true)}
           >
             <Text style={styles.secondaryButtonLabel}>Test pattern (dev)</Text>
-          </Pressable>
-
-          <Text style={styles.sectionLabel}>BIOS</Text>
-          <Pressable style={styles.biosRow} onPress={pickBios}>
-            <Text style={styles.biosStatusText}>
-              {!biosChecked
-                ? "Checking…"
-                : biosBase64
-                  ? "Real BIOS loaded"
-                  : "Using built-in HLE (no real BIOS)"}
-            </Text>
-            <Text style={styles.biosAction}>
-              {biosBase64 ? "Replace" : "Load BIOS"}
-            </Text>
           </Pressable>
 
           <Text style={styles.sectionLabel}>Recent ROMs</Text>
@@ -379,28 +365,6 @@ const styles = StyleSheet.create({
   recentEmptyText: {
     color: "#4A4A55",
     fontSize: 13,
-  },
-  biosRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    alignSelf: "stretch",
-    borderRadius: 10,
-    borderWidth: 1,
-    borderColor: "#22222A",
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  biosStatusText: {
-    color: "#8A8A96",
-    fontSize: 13,
-    flexShrink: 1,
-    paddingRight: 12,
-  },
-  biosAction: {
-    color: ACCENT,
-    fontSize: 13,
-    fontWeight: "600",
   },
   controlsArea: {
     alignItems: "center",

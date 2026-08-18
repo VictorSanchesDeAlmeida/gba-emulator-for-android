@@ -15,6 +15,14 @@ export type GbaEmulatorViewProps = {
    */
   biosBase64?: string;
   /**
+   * Absolute filesystem path where this ROM's cartridge save memory
+   * (SRAM/Flash) should be read from (once, on load) and periodically
+   * autosaved to. Optional — without it, save data stays in memory only
+   * and is lost when the view unmounts. Set this alongside `romBase64`;
+   * changing it later reloads the ROM, same as `romBase64`/`biosBase64`.
+   */
+  savePath?: string;
+  /**
    * Renders a fixed colorful scene without needing a ROM. Development
    * aid only — verifies the native rendering pipeline independently of
    * whether a given ROM's own boot sequence ever draws anything.

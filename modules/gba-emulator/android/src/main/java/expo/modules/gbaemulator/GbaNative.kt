@@ -23,4 +23,9 @@ object GbaNative {
   // never a fixed-length out-param like getFrameBuffer.
   external fun getAudioBuffer(ptr: Long): ShortArray
   external fun setKey(ptr: Long, key: Int, pressed: Boolean)
+  // Cartridge battery-backed save memory (SRAM/Flash) — see the Rust
+  // side's `Instance::save_data`/`load_save_data`. loadSaveData must be
+  // called after loadRom, since loading a ROM starts its save chip blank.
+  external fun getSaveData(ptr: Long): ByteArray
+  external fun loadSaveData(ptr: Long, data: ByteArray): Boolean
 }

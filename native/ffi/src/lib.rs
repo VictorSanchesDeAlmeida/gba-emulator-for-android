@@ -42,12 +42,33 @@ const CYCLES_PER_AUDIO_SAMPLE: u32 = gba_core::emulator::CPU_CLOCK_HZ / AUDIO_SA
 /// mix is technically-correct-shaped but sits within ~0.1% of i16's range,
 /// i.e. inaudible at normal volume. 128x brings a typical DMA sample
 /// (the dominant source in most commercial games' music) up to a healthy
-/// portion of full scale while leaving headroom before every channel maxed
-/// out simultaneously (a rare, real-hardware-saturating case) hard-clips.
-const AUDIO_GAIN: i32 = 128;
+/// portion of full scale.
+///
+/// The theoretical worst case — both DMA channels at full volume and
+/// panned to the same side (±127×2 each) plus all four PSG channels maxed
+/// (±15 each, i.e. ±60) — is ±568 DAC units, which 128x pushes to ±72,704:
+/// well past i16's ±32,767. That's not actually rare in commercial game
+/// music (heavy DMA Direct Sound use is the norm, not the exception), so a
+/// hard `.clamp()` there produced audible harsh digital clipping ("popping"
+/// during loud passages) instead of the gentle analog saturation real
+/// hardware's amp would produce. [`soft_clip`] replaces that hard wall with
+/// a smooth tanh saturation curve: for samples well inside range it's
+/// indistinguishable from the plain multiply (tanh(x) ≈ x for small x, so
+/// normal-volume passages are exactly as loud as before), and it only
+/// compresses the rare peaks that would otherwise have clipped, instead of
+/// slicing them off abruptly.
+const AUDIO_GAIN: f64 = 128.0;
+
+/// Smoothly saturates `x` toward ±`i16::MAX` via `tanh`, instead of the
+/// hard-edged distortion a `.clamp()` produces — see [`AUDIO_GAIN`]'s doc
+/// comment for why this project needs it at all.
+fn soft_clip(x: f64) -> i16 {
+    let full_scale = i16::MAX as f64;
+    (full_scale * (x / full_scale).tanh()).round() as i16
+}
 
 fn scale_to_pcm16(sample: i16) -> i16 {
-    (sample as i32 * AUDIO_GAIN).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+    soft_clip(sample as f64 * AUDIO_GAIN)
 }
 
 /// One emulator session, boxed and handed to the host as an opaque
@@ -181,6 +202,28 @@ impl Instance {
         }
     }
 
+    /// The current cartridge's battery-backed save memory (SRAM/Flash), for
+    /// the host to persist to its own storage between sessions — this
+    /// project has no notion of *where* that goes, only what the bytes
+    /// are. Empty if no ROM is loaded or the cartridge has no save chip
+    /// (`gba_core`'s `SaveType::None`), which is indistinguishable here
+    /// from "nothing to save yet" — both are correctly a no-op to persist.
+    fn save_data(&self) -> Vec<u8> {
+        self.emulator.as_ref().map_or(Vec::new(), |e| e.bus.cartridge().save_bytes().to_vec())
+    }
+
+    /// Restores previously-persisted save memory (from [`Self::save_data`])
+    /// into the currently loaded cartridge. Must be called after
+    /// [`Self::load_rom`], since loading a ROM starts its save chip blank —
+    /// there's no cartridge to restore into before that. A no-op if no ROM
+    /// is loaded; a length mismatch (e.g. a save file left over from a
+    /// different game) is handled by `gba_core` itself, not here.
+    fn load_save_data(&mut self, data: &[u8]) -> bool {
+        let Some(emulator) = &mut self.emulator else { return false };
+        emulator.bus.cartridge_mut().load_save_bytes(data);
+        true
+    }
+
     /// Forwards a discrete button event to the joypad. `key` is the same
     /// numeric ID on both sides of the bridge — see
     /// `gba_core::joypad::Button::from_index`. Unknown IDs and calls before
@@ -194,5 +237,98 @@ impl Instance {
         } else {
             emulator.release_key(button);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn soft_clip_is_near_identity_for_small_inputs() {
+        // tanh(x) ≈ x for small x, so ordinary-volume samples must come out
+        // essentially unchanged from a plain multiply — this is what keeps
+        // normal-volume passages exactly as loud as before the fix.
+        assert_eq!(soft_clip(1000.0), 1000);
+        assert_eq!(soft_clip(-1000.0), -1000);
+    }
+
+    #[test]
+    fn soft_clip_never_overflows_on_extreme_inputs() {
+        // A wildly out-of-range input must saturate smoothly toward (not
+        // past) i16's bounds — no panic, no wraparound. `tanh` gets close
+        // enough to ±1 here that the rounded result lands exactly on
+        // i16::MAX/MIN, which is fine — the property that matters is no
+        // overflow, not staying strictly inside.
+        let huge = soft_clip(1_000_000.0);
+        assert!(huge > 0 && huge <= i16::MAX);
+        let huge_negative = soft_clip(-1_000_000.0);
+        assert!(huge_negative < 0 && huge_negative >= i16::MIN);
+    }
+
+    #[test]
+    fn scale_to_pcm16_handles_the_theoretical_worst_case_without_panicking() {
+        // Both DMA channels maxed and panned together, plus all four PSG
+        // channels maxed: ±568 DAC units (see AUDIO_GAIN's doc comment).
+        let worst_case = scale_to_pcm16(568);
+        assert!(worst_case > 0);
+        let worst_case_negative = scale_to_pcm16(-568);
+        assert!(worst_case_negative < 0);
+    }
+
+    /// Minimal synthetic ROM carrying a save-type signature — same
+    /// construction `gba_core::cartridge::cartridge`'s own tests use, just
+    /// duplicated here since that helper isn't exported (this crate has no
+    /// business depending on `gba_core`'s private test internals).
+    fn rom_with_signature(signature: &[u8]) -> Vec<u8> {
+        let mut rom = vec![0u8; gba_core::cartridge::HEADER_SIZE + 64];
+        rom[0xB2] = 0x96; // fixed value real header parsing checks
+        rom[gba_core::cartridge::HEADER_SIZE..gba_core::cartridge::HEADER_SIZE + signature.len()]
+            .copy_from_slice(signature);
+        rom
+    }
+
+    #[test]
+    fn save_data_round_trips_through_a_fresh_instance() {
+        let mut writer = Instance::new();
+        assert!(writer.load_rom(rom_with_signature(b"SRAM_V113")));
+
+        // Nothing saved yet: a cartridge with a save chip starts blank —
+        // 0xFF throughout, matching real erased battery-backed SRAM, not 0.
+        let blank = writer.save_data();
+        assert!(blank.iter().all(|&b| b == 0xFF), "SRAM must start erased (0xFF)");
+
+        // Stand in for the game writing to its own save chip during play.
+        writer.emulator.as_mut().unwrap().bus.cartridge_mut().write_save_byte(10, 0x42);
+        let saved = writer.save_data();
+        assert_eq!(saved[10], 0x42);
+
+        // A brand new Instance (modeling the app being closed and
+        // reopened) must come back with that exact save applied after
+        // load_rom + load_save_data, matching maybeLoadRom's own sequence
+        // on the Kotlin side.
+        let mut reader = Instance::new();
+        assert!(reader.load_rom(rom_with_signature(b"SRAM_V113")));
+        assert!(reader.load_save_data(&saved));
+        assert_eq!(reader.save_data(), saved);
+    }
+
+    #[test]
+    fn save_data_is_empty_for_a_cartridge_without_a_save_chip() {
+        let mut instance = Instance::new();
+        assert!(instance.load_rom(rom_with_signature(b"nothing here")));
+        assert!(instance.save_data().is_empty());
+    }
+
+    #[test]
+    fn save_data_is_empty_before_any_rom_is_loaded() {
+        let instance = Instance::new();
+        assert!(instance.save_data().is_empty());
+    }
+
+    #[test]
+    fn load_save_data_is_a_no_op_before_any_rom_is_loaded() {
+        let mut instance = Instance::new();
+        assert!(!instance.load_save_data(&[1, 2, 3]));
     }
 }

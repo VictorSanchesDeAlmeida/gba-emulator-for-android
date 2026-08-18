@@ -126,6 +126,48 @@ pub unsafe extern "C" fn gba_take_audio_samples(ptr: *mut Mutex<Instance>, out: 
     n
 }
 
+/// Writes up to `max_len` bytes of the current cartridge's battery-backed
+/// save memory into `out`, and returns how many were actually written —
+/// same "caller sizes generously, use the returned count, 0 means nothing
+/// to hand back" contract as [`gba_take_audio_samples`]. Save sizes are
+/// well-known in advance (32KB SRAM, 64/128KB Flash), so callers can size
+/// `out` for the largest of those rather than needing a two-call
+/// size-then-fetch dance.
+///
+/// # Safety
+/// `ptr` must come from [`gba_create`]; `out` must point to at least
+/// `max_len` valid, writable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn gba_get_save_data(ptr: *mut Mutex<Instance>, out: *mut c_uchar, max_len: usize) -> usize {
+    if ptr.is_null() || out.is_null() {
+        return 0;
+    }
+    let Ok(instance) = (*ptr).lock() else { return 0 };
+    let data = instance.save_data();
+    let n = data.len().min(max_len);
+    let slice = std::slice::from_raw_parts_mut(out, n);
+    slice.copy_from_slice(&data[..n]);
+    n
+}
+
+/// Restores save memory (previously obtained from [`gba_get_save_data`])
+/// into the currently loaded cartridge. Must be called after
+/// [`gba_load_rom`]. Returns `false` if there's no instance or no ROM is
+/// loaded.
+///
+/// # Safety
+/// `ptr` must come from [`gba_create`]; `data` must point to `len` valid
+/// bytes for the duration of this call.
+#[no_mangle]
+pub unsafe extern "C" fn gba_load_save_data(ptr: *mut Mutex<Instance>, data: *const c_uchar, len: usize) -> bool {
+    if ptr.is_null() || data.is_null() {
+        return false;
+    }
+    let bytes = std::slice::from_raw_parts(data, len);
+    let Ok(mut instance) = (*ptr).lock() else { return false };
+    instance.load_save_data(bytes)
+}
+
 /// # Safety
 /// `ptr` must come from [`gba_create`] (or be null, in which case this is
 /// a no-op).

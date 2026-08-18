@@ -1,0 +1,9 @@
+{
+  "platforms": ["apple", "android"],
+  "apple": {
+    "modules": ["GbaEmulatorModule"]
+  },
+  "android": {
+    "modules": ["expo.modules.gbaemulator.GbaEmulatorModule"]
+  }
+}

@@ -41,3 +41,28 @@ example
 # generated native folders
 /ios
 /android
+
+# ROM files (user-provided, may be commercial — never commit)
+/roms/*
+!/roms/.gitkeep
+
+# Rust build artifacts — the workspace root Cargo.toml puts all build
+# output here, not under core/ or native/, regardless of which member you
+# build (unless you point cargo at a member directly with its own
+# --target-dir, hence the extra patterns below).
+/target/
+/core/target/
+/native/**/target/
+/native/**/*.a
+/native/**/*.xcframework
+
+# Gradle build output for the native Expo module (modules/gba-emulator/android
+# is real source and IS committed — only its build/ output isn't). The
+# compiled libgba_ffi.so under jniLibs/ IS committed on purpose: see
+# README.md — the Gradle module has no Cargo/NDK build step wired in, so
+# without a vendored .so a fresh clone can't run until someone rebuilds it.
+modules/**/android/build/
+modules/**/android/.cxx/
+modules/**/android/.gradle/
+modules/**/android/local.properties
+*.iml

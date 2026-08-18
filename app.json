@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "emulator",
+    "name": "GBA Emulator",
     "slug": "emulator",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -17,7 +17,8 @@
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "package": "com.anonymous.emulator"
     },
     "web": {
       "output": "static",
@@ -28,7 +29,7 @@
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#208AEF",
+          "backgroundColor": "#0B0B0E",
           "image": "./assets/images/splash-icon.png",
           "imageWidth": 76
         }

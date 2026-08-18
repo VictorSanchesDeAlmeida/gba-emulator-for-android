@@ -1,0 +1,15 @@
+[env]
+# Android NDK toolchain (r27.1.12297006), used directly instead of cargo-ndk:
+# cargo-ndk itself fails to compile on this machine's MinGW/GNU host
+# toolchain (its `windows`-crate dependency needs `raw-dylib` linking,
+# which GNU ld doesn't support the way LLD/MSVC do). Pointing Cargo at the
+# NDK's own clang wrappers sidesteps needing cargo-ndk's binary at all.
+ANDROID_NDK_HOME = "C:/Android/Sdk/ndk/27.1.12297006"
+
+[target.aarch64-linux-android]
+ar = "C:/Android/Sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+linker = "C:/Android/Sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/windows-x86_64/bin/aarch64-linux-android24-clang.cmd"
+
+[target.armv7-linux-androideabi]
+ar = "C:/Android/Sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/windows-x86_64/bin/llvm-ar.exe"
+linker = "C:/Android/Sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/windows-x86_64/bin/armv7a-linux-androideabi24-clang.cmd"

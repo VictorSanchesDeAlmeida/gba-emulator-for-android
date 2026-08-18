@@ -1,0 +1,9 @@
+[package]
+name = "gba-core"
+version = "0.1.0"
+edition = "2021"
+description = "Independent Game Boy Advance emulator core (no React Native / Expo dependencies)."
+
+[lib]
+name = "gba_core"
+path = "src/lib.rs"

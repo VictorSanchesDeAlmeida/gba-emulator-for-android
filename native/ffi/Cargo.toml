@@ -1,0 +1,16 @@
+[package]
+name = "gba-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "JNI bridge between gba-core and the Android Expo module. Not used by iOS (Swift talks to gba-core through its own C ABI, defined alongside this crate)."
+
+[lib]
+name = "gba_ffi"
+# cdylib for Android (JNI loads a shared library). staticlib is for the
+# iOS side once that's built on a Mac (Etapa 7 iOS follow-up).
+crate-type = ["cdylib", "staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+gba-core = { path = "../../core" }
+jni = "0.21"
